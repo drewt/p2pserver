@@ -33,10 +33,6 @@ static const struct {
     size_t len;
 } delim = { "\r\n\r\n", 4 };
 
-static const char * const good = "OK\r\n";
-static const char * const bad  = "ER\r\n";
-static const size_t def_len = 5;
-
 static inline bool cmd_equal (const char *str, const char *cmd, size_t len) {
     return !strncmp (str, cmd, len) && str[len] == '\0';
 }
@@ -99,15 +95,46 @@ static int send_msg (int sock, char *buf, size_t len) {
     return 0;
 }
 
+static int send_response (int sock, struct response_node *node) {
+    while (node) {
+        if (send_msg (sock, node->data, node->size) == -1)
+            return -1;
+        node = node->next;
+    }
+    return 0;
+}
+
+static void make_response (struct response_node *prev, const char *data,
+        size_t data_size) {
+    prev->next = malloc (sizeof (struct response_node));
+    prev->next->data = strdup (data);
+    prev->next->size = data_size+1;
+    prev->next->next = NULL;
+}
+
+static void free_response (struct response_node *node) {
+    struct response_node *next;
+
+    while (node) {
+        next = node->next;
+        free (node->data);
+        free (node);
+        node = next;
+    }
+}
+
+static inline void response_bad (struct response_node *prev) {
+    make_response (prev, "ER\r\n", 4);
+}
+
+static inline void response_ok (struct response_node *prev) {
+    make_response (prev, "OK\r\n", 4);
+}
+
 /*-----------------------------------------------------------------------------
  * Handles requests from the client */
 //-----------------------------------------------------------------------------
 void *handle_request (void *data) {
-
-    struct {
-        char   *str;
-        size_t len;
-    } response;
 
     bool done;
     struct conn_info *info;
@@ -115,13 +142,13 @@ void *handle_request (void *data) {
     char msg_buf[MSG_MAX];
     char *cmd, *port, *p;
 
+    struct response_node response_head;
     struct recv_buf recv_buf = { .pos = 0, .len = 0 };
 
     info = data;
     done = false;
 
     while (!done) {
-        response.len = def_len;
 
         // go to cleanup if connection was closed
         if (!read_msg (info->sock, &recv_buf, msg_buf))
@@ -132,14 +159,15 @@ void *handle_request (void *data) {
         port = strtok_r (NULL,    " \r\n", &p);
 
         // construct response
+        response_head.next = NULL;
         if (!cmd) {
-            response.str = strdup (bad);
+            response_bad (&response_head);
         } else if (cmd_equal (cmd, "CONNECT", 7)) {
 
             if (!port || add_client (info->addr, port)) {
-                response.str = strdup (bad);
+                response_bad (&response_head);
             } else {
-                response.str = strdup (good);
+                response_ok (&response_head);
 #ifdef P2PSERV_LOG
                 printf (ANSI_GREEN "+ %s %s\n" ANSI_RESET, info->addr, port);
 #endif
@@ -147,32 +175,35 @@ void *handle_request (void *data) {
         } else if (cmd_equal (cmd, "DISCONNECT", 10)) {
 
             if (!port || remove_client (info->addr, port)) {
-                response.str = strdup (bad);
+                response_bad (&response_head);
             } else {
-                response.str = strdup (good);
+                response_ok (&response_head);
 #ifdef P2PSERV_LOG
                 printf (ANSI_RED "- %s %s\n" ANSI_RESET, info->addr, port);
 #endif
             }
         } else if (cmd_equal (cmd, "LIST", 4)) {
-            if (!port || clients_to_json (&response.str, info->addr, port)) {
-                response.str = strdup (bad);
+            struct response_node *jlist;
+            if (!port || clients_to_json (&jlist, info->addr, port)) {
+                response_bad (&response_head);
             } else {
-                response.len = strlen (response.str) + 1;
+                response_head.next = jlist;
 #ifdef P2PSERV_LOG
                 printf (ANSI_YELLOW "L %s %s\n" ANSI_RESET, info->addr, port);
 #endif
             }
         } else if (cmd_equal (cmd, "EXIT", 4)) {
-            response.str = strdup (good);
+            response_ok (&response_head);
             done = true;
         } else {
-            response.str = strdup (bad);
+            response_bad (&response_head);
         }
 
         // send response
-        send_msg (info->sock, response.str, response.len);
-        free (response.str);
+        //send_msg (info->sock, response.str, response.len);
+        //free (response.str);
+        send_response (info->sock, response_head.next);
+        free_response (response_head.next);
     }
 
 #ifdef P2PSERV_LOG

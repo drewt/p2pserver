@@ -23,6 +23,12 @@ struct conn_info {
     char addr[INET6_ADDRSTRLEN];
 };
 
+struct response_node {
+    char *data;
+    size_t size;
+    struct response_node *next;
+};
+
 void *handle_request (void *data);
 
 extern int num_threads;
